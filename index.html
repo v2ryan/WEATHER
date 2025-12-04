@@ -14,23 +14,50 @@
             top: 20px;
             left: 20px;
             pointer-events: none; /* Let clicks pass through to 3D */
+            z-index: 10;
         }
         
         .card {
-            background: rgba(255, 255, 255, 0.9);
+            background: rgba(255, 255, 255, 0.95);
             padding: 20px;
             border-radius: 15px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.2);
             backdrop-filter: blur(5px);
             pointer-events: auto;
-            max-width: 300px;
+            max-width: 320px;
             border: 2px solid #fff;
         }
 
         h1 { margin: 0 0 10px 0; font-size: 1.5rem; color: #333; }
         .temp-display { font-size: 2.5rem; font-weight: bold; color: #ff6b6b; }
         .info-row { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; color: #555; }
-        .icon { font-size: 1.5rem; }
+        
+        /* District Image Styling */
+        #district-image {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            transition: opacity 0.3s;
+        }
+        
+        /* District Selector Styling */
+        .district-select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            background-color: #fff;
+            font-family: 'Microsoft JhengHei', sans-serif;
+            font-size: 0.9rem;
+            cursor: pointer;
+            outline: none;
+        }
+        .district-select:hover { border-color: #4CAF50; }
 
         #snapshot-btn {
             position: absolute;
@@ -50,6 +77,7 @@
             display: flex;
             align-items: center;
             gap: 10px;
+            z-index: 10;
         }
         #snapshot-btn:hover { transform: scale(1.05); background: #45a049; }
         #snapshot-btn:active { transform: scale(0.95); }
@@ -63,6 +91,7 @@
             text-shadow: 0 2px 4px rgba(0,0,0,0.5);
             pointer-events: none;
             transition: opacity 0.5s;
+            z-index: 20;
         }
 
         /* 3D Label Styling (CSS2D) */
@@ -92,6 +121,15 @@
     <div id="ui-layer">
         <div class="card">
             <h1>📍 香港天氣 (Live)</h1>
+            
+            <!-- District Selector -->
+            <select id="district-list" class="district-select" disabled>
+                <option>正在獲取地區列表...</option>
+            </select>
+            
+            <!-- District Image Preview -->
+            <img id="district-image" src="" alt="District View" style="display:none;">
+
             <div class="info-row">
                 <div class="temp-display" id="temp-val">--°C</div>
                 <div id="weather-desc">載入中...</div>
@@ -100,7 +138,7 @@
                 <span id="humidity">濕度: --%</span>
             </div>
             <div style="font-size: 0.8rem; color: #888; margin-top: 10px;">
-                數據來源: 香港天文台
+                數據來源: 香港天文台 & 維基百科
             </div>
         </div>
     </div>
@@ -115,18 +153,39 @@
     // --- Configuration ---
     let scene, camera, renderer, labelRenderer, controls;
     let rainSystem, cloudGroup;
+    let cityGroup = new THREE.Group(); // Group to hold buildings for easy clearing
     const buildings = [];
     let isRaining = false;
     let isNight = false;
     let waterMesh;
+    
+    // Seed for procedural generation
+    let currentSeed = 1;
 
     // --- Weather Data State ---
     const weatherState = {
         temp: 25,
         humidity: 80,
         conditionrip: "Clear",
-        isRainy: false
+        isRainy: false,
+        districtData: []
     };
+
+    // --- Helper: Seeded Random ---
+    function setSeed(str) {
+        let h = 0xdeadbeef;
+        for(let i = 0; i < str.length; i++) {
+            h = Math.imul(h ^ str.charCodeAt(i), 2654435761);
+        }
+        currentSeed = (h ^ h >>> 16) >>> 0;
+    }
+
+    function seededRandom() {
+        var t = currentSeed += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
 
     // --- Initialization ---
     function init() {
@@ -134,12 +193,13 @@
 
         // 1. Scene
         scene = new THREE.Scene();
+        scene.add(cityGroup); // Add the group that will hold our city
         
-        // 2. Camera (Orthographic for Isometric/Toy look)
+        // 2. Camera
         const aspect = window.innerWidth / window.innerHeight;
-        const d = 35; // View size
+        const d = 35;
         camera = new THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 1, 1000);
-        camera.position.set(40, 35, 40); // Isometric angle
+        camera.position.set(40, 35, 40);
         camera.lookAt(0, 0, 0);
 
         // 3. Renderer
@@ -149,45 +209,108 @@
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         container.appendChild(renderer.domElement);
 
-        // 4. CSS2D Renderer (for floating HTML labels)
+        // 4. Labels
         labelRenderer = new THREE.CSS2DRenderer();
         labelRenderer.setSize(window.innerWidth, window.innerHeight);
         labelRenderer.domElement.style.position = 'absolute';
         labelRenderer.domElement.style.top = '0px';
-        labelRenderer.domElement.style.pointerEvents = 'none'; // Allow clicks to pass through
+        labelRenderer.domElement.style.pointerEvents = 'none';
         container.appendChild(labelRenderer.domElement);
 
         // 5. Controls
         controls = new THREE.OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
-        controls.maxPolarAngle = Math.PI / 2.2; // Don't go below ground
+        controls.maxPolarAngle = Math.PI / 2.2;
         controls.minZoom = 0.5;
         controls.maxZoom = 2;
 
-        // 6. Lights
+        // 6. Setup
         setupLights();
-
-        // 7. World Generation
         createEnvironment();
-        createCity();
         
-        // 8. Event Listeners
+        // Initial City (Default)
+        setSeed("Hong Kong Observatory");
+        createCity("Hong Kong Observatory");
+
+        // 7. Events
         window.addEventListener('resize', onWindowResize, false);
         document.getElementById('snapshot-btn').addEventListener('click', takeSnapshot);
+        
+        // District Change Listener
+        document.getElementById('district-list').addEventListener('change', (e) => {
+            const districtName = e.target.value;
+            handleDistrictChange(districtName);
+        });
 
-        // 9. Initial Weather Fetch
+        // 8. Fetch Data
         checkTimeOfDay();
         fetchWeather();
-        setInterval(fetchWeather, 600000); // Update every 10 mins
+        setInterval(fetchWeather, 600000);
 
-        // 10. Start Loop
+        // 9. Loop
         animate();
     }
 
-    // --- Lighting & Atmosphere ---
-    let sunLight, ambientLight;
+    // --- Logic for changing district ---
+    async function handleDistrictChange(districtName) {
+        // 1. Update Temperature Text
+        updateTemperatureDisplay(districtName);
+        
+        // 2. Update Image using Wikipedia API (Zh)
+        const img = document.getElementById('district-image');
+        img.style.display = 'block';
+        img.style.opacity = '0.5'; // Visual feedback for loading
 
+        try {
+            // Fetch from Chinese Wikipedia (since HKO API returns traditional Chinese names)
+            const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&titles=${districtName}&prop=pageimages&format=json&pithumbsize=400&origin=*`;
+            
+            const response = await fetch(wikiUrl);
+            const data = await response.json();
+            
+            const pages = data.query.pages;
+            const pageId = Object.keys(pages)[0];
+            
+            if (pageId && pages[pageId].thumbnail) {
+                img.src = pages[pageId].thumbnail.source;
+                img.alt = districtName;
+            } else {
+                // Fallback if no specific wiki image found, try appending "香港" (Hong Kong) for better context search
+                 // Or just hide it/show placeholder
+                 if (!districtName.includes("香港")) {
+                     // Try one more time with "Hong Kong" prefix for context
+                     const retryUrl = `https://zh.wikipedia.org/w/api.php?action=query&titles=香港${districtName}&prop=pageimages&format=json&pithumbsize=400&origin=*`;
+                     const retryResp = await fetch(retryUrl);
+                     const retryData = await retryResp.json();
+                     const retryPages = retryData.query.pages;
+                     const retryId = Object.keys(retryPages)[0];
+                     
+                     if (retryId && retryPages[retryId].thumbnail) {
+                         img.src = retryPages[retryId].thumbnail.source;
+                     } else {
+                         // Final fallback: Hide or generic placeholder
+                         img.src = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Hong_Kong_Skyline_Restitch_-_Dec_2009.jpg/640px-Hong_Kong_Skyline_Restitch_-_Dec_2009.jpg"; 
+                     }
+                 } else {
+                    img.src = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Hong_Kong_Skyline_Restitch_-_Dec_2009.jpg/640px-Hong_Kong_Skyline_Restitch_-_Dec_2009.jpg"; 
+                 }
+            }
+        } catch (err) {
+            console.error("Wiki Fetch Error:", err);
+            // Fallback image (Victoria Harbour)
+            img.src = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Hong_Kong_Skyline_Restitch_-_Dec_2009.jpg/640px-Hong_Kong_Skyline_Restitch_-_Dec_2009.jpg";
+        }
+        
+        img.onload = () => { img.style.opacity = '1'; };
+
+        // 3. Regenerate 3D City Layout
+        setSeed(districtName); // Set the RNG seed based on name
+        createCity(districtName); // Rebuild city
+    }
+
+    // --- Lighting ---
+    let sunLight, ambientLight;
     function setupLights() {
         ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
         scene.add(ambientLight);
@@ -197,16 +320,11 @@
         sunLight.castShadow = true;
         sunLight.shadow.mapSize.width = 2048;
         sunLight.shadow.mapSize.height = 2048;
-        sunLight.shadow.camera.near = 0.5;
-        sunLight.shadow.camera.far = 200;
-        
-        // Shadow camera bounds for Orthographic
         const d = 50;
         sunLight.shadow.camera.left = -d;
         sunLight.shadow.camera.right = d;
         sunLight.shadow.camera.top = d;
         sunLight.shadow.camera.bottom = -d;
-
         scene.add(sunLight);
     }
 
@@ -218,50 +336,34 @@
 
     function updateDayNightVisuals() {
         const body = document.body;
-        
         if (isNight) {
-            // Night Mode
-            body.style.backgroundColor = '#0f172a'; // Dark blue
+            body.style.backgroundColor = '#0f172a';
             scene.background = new THREE.Color('#0f172a');
             ambientLight.intensity = 0.2;
             sunLight.intensity = 0.2;
-            sunLight.color.setHex(0xaaaaff); // Moonlight
-            
-            // Turn on building lights (emissive)
+            sunLight.color.setHex(0xaaaaff);
             buildings.forEach(b => {
                 if (b.material.emissive) {
-                    b.material.emissive.setHex(Math.random() > 0.5 ? 0xffffaa : 0x000000);
+                    b.material.emissive.setHex(seededRandom() > 0.5 ? 0xffffaa : 0x000000);
                     b.material.emissiveIntensity = 0.5;
                 }
             });
-
-            // Darker water
             if(waterMesh) waterMesh.material.color.setHex(0x001e36);
-
         } else {
-            // Day Mode
-            body.style.backgroundColor = '#87CEEB'; // Sky blue
+            body.style.backgroundColor = '#87CEEB';
             scene.background = new THREE.Color('#87CEEB');
             ambientLight.intensity = 0.6;
             sunLight.intensity = 0.9;
             sunLight.color.setHex(0xffffff);
-
-            // Turn off building lights
             buildings.forEach(b => {
-                if (b.material.emissive) {
-                    b.material.emissive.setHex(0x000000);
-                }
+                if (b.material.emissive) b.material.emissive.setHex(0x000000);
             });
-
-            // Lighter water
             if(waterMesh) waterMesh.material.color.setHex(0x1ca3ec);
         }
     }
 
-    // --- Procedural Generation Helpers ---
-
+    // --- World Gen ---
     function createEnvironment() {
-        // Base Platform (Island)
         const islandGeo = new THREE.CylinderGeometry(28, 28, 2, 8);
         const islandMat = new THREE.MeshLambertMaterial({ color: 0xe0e0e0 });
         const island = new THREE.Mesh(islandGeo, islandMat);
@@ -269,7 +371,6 @@
         island.receiveShadow = true;
         scene.add(island);
 
-        // Water
         const waterGeo = new THREE.PlaneGeometry(500, 500);
         const waterMat = new THREE.MeshLambertMaterial({ color: 0x1ca3ec, transparent: true, opacity: 0.8 });
         waterMesh = new THREE.Mesh(waterGeo, waterMat);
@@ -278,125 +379,112 @@
         scene.add(waterMesh);
     }
 
-    // Create a texture for windows programmatically
     function createWindowTexture() {
         const canvas = document.createElement('canvas');
-        canvas.width = 64;
-        canvas.height = 64;
+        canvas.width = 64; canvas.height = 64;
         const ctx = canvas.getContext('2d');
-        
-        // Background (Wall)
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0,0,64,64);
-
-        // Windows
-        ctx.fillStyle = '#444'; // Dark window by default
-        // Draw 2x2 window grid
-        ctx.fillRect(8, 8, 20, 20);
-        ctx.fillRect(36, 8, 20, 20);
-        ctx.fillRect(8, 36, 20, 20);
-        ctx.fillRect(36, 36, 20, 20);
-
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,64,64);
+        ctx.fillStyle = '#444';
+        ctx.fillRect(8, 8, 20, 20); ctx.fillRect(36, 8, 20, 20);
+        ctx.fillRect(8, 36, 20, 20); ctx.fillRect(36, 36, 20, 20);
         const tex = new THREE.CanvasTexture(canvas);
-        tex.magFilter = THREE.NearestFilter; // Sharp pixels
+        tex.magFilter = THREE.NearestFilter;
         return tex;
     }
 
-    function createCity() {
+    // REFACTORED: Create City based on seed/district
+    function createCity(districtName) {
+        // 1. Clean up old city
+        while(cityGroup.children.length > 0){ 
+            const obj = cityGroup.children[0];
+            cityGroup.remove(obj);
+            if(obj.geometry) obj.geometry.dispose();
+            // Don't dispose shared material if cached, but here we clone mostly
+        }
+        // Remove Labels from DOM
+        const oldLabels = document.querySelectorAll('.label-3d');
+        oldLabels.forEach(el => el.remove());
+        buildings.length = 0; // Clear array
+
         const windowTex = createWindowTexture();
-        const material = new THREE.MeshStandardMaterial({ 
-            map: windowTex,
-            color: 0xeeeeee,
-            roughness: 0.2,
-            metalness: 0.1
+        const baseMat = new THREE.MeshStandardMaterial({ 
+            map: windowTex, color: 0xeeeeee, roughness: 0.2, metalness: 0.1 
         });
 
-        const matColors = [0xffffff, 0xdddddd, 0xaaccff];
+        // 2. Decide if we show Landmarks (Only for "Central" like areas)
+        const isCentralArea = ["香港天文台", "Hong Kong Observatory", "The Peak", "Central", "King's Park"].some(k => districtName.includes(k));
+        
+        if (isCentralArea) {
+            // BoC Tower
+            const bocGeo = new THREE.BoxGeometry(4, 16, 4);
+            const bocMat = new THREE.MeshStandardMaterial({ color: 0xaaaaee, roughness: 0.1, metalness: 0.5, emissive: 0x111133 });
+            const boc = new THREE.Mesh(bocGeo, bocMat);
+            boc.position.set(-8, 8, -8);
+            boc.rotation.y = Math.PI / 4;
+            boc.castShadow = true; boc.receiveShadow = true;
+            cityGroup.add(boc);
+            buildings.push(boc);
+            addLabel(boc, "中銀大廈", 10);
 
-        // 1. Bank of China Tower (Custom Geometry)
-        // Simplified as a stack of prisms
-        const bocHeight = 16;
-        const bocGeo = new THREE.BoxGeometry(4, bocHeight, 4);
-        // Create the cross bracing effect simply via geometry or texture is hard, 
-        // let's stick to shape. We rotate it 45 deg to look like a diamond.
-        const bocMat = new THREE.MeshStandardMaterial({ 
-            color: 0xaaaaee, roughness: 0.1, metalness: 0.5, 
-            emissive: 0x111133 
-        });
-        const boc = new THREE.Mesh(bocGeo, bocMat);
-        boc.position.set(-8, bocHeight/2, -8);
-        boc.rotation.y = Math.PI / 4;
-        boc.castShadow = true;
-        boc.receiveShadow = true;
-        scene.add(boc);
-        buildings.push(boc);
-        addLabel(boc, "中銀大廈", 10);
+            // IFC
+            const ifcGeo = new THREE.BoxGeometry(5, 18, 5);
+            const ifcMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.3 });
+            const ifc = new THREE.Mesh(ifcGeo, ifcMat);
+            ifc.position.set(8, 9, -5);
+            ifc.castShadow = true; ifc.receiveShadow = true;
+            cityGroup.add(ifc);
+            buildings.push(ifc);
+            addLabel(ifc, "IFC", 11);
+        }
 
-        // 2. IFC (Tall rectangular prism with crown)
-        const ifcHeight = 18;
-        const ifcGeo = new THREE.BoxGeometry(5, ifcHeight, 5);
-        const ifcMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.3 });
-        const ifc = new THREE.Mesh(ifcGeo, ifcMat);
-        ifc.position.set(8, ifcHeight/2, -5);
-        ifc.castShadow = true;
-        scene.add(ifc);
-        buildings.push(ifc);
-        addLabel(ifc, "IFC", 11);
+        // 3. Generate Procedural Buildings (Randomized by Seed)
+        // More buildings for "urban" vibe
+        const numBuildings = Math.floor(seededRandom() * 15) + 20; 
+        const matColors = [0xffffff, 0xdddddd, 0xaaccff, 0xffeebb];
 
-        // 3. Random Skyscrapers
-        for(let i=0; i<30; i++) {
-            const h = Math.random() * 8 + 3; // Height 3 to 11
-            const w = Math.random() * 2 + 1.5;
+        for(let i=0; i<numBuildings; i++) {
+            const h = seededRandom() * 8 + 3; // Height 3-11
+            const w = seededRandom() * 2 + 1.5;
             
             const geo = new THREE.BoxGeometry(w, h, w);
-            const thisMat = material.clone();
-            thisMat.color.setHex(matColors[Math.floor(Math.random()*matColors.length)]);
+            const thisMat = baseMat.clone();
+            thisMat.color.setHex(matColors[Math.floor(seededRandom()*matColors.length)]);
             
             const b = new THREE.Mesh(geo, thisMat);
             
-            // Random position in circle, avoiding center roughly
-            const angle = Math.random() * Math.PI * 2;
-            const radius = Math.random() * 18 + 5; // 5 to 23 radius
+            // Random Pos via seed
+            const angle = seededRandom() * Math.PI * 2;
+            const radius = seededRandom() * 18 + 5;
             const x = Math.cos(angle) * radius;
             const z = Math.sin(angle) * radius;
 
-            // Simple collision check logic (very basic)
-            if(Math.abs(x - (-8)) < 4 && Math.abs(z - (-8)) < 4) continue; // Avoid BoC
-            if(Math.abs(x - 8) < 4 && Math.abs(z - (-5)) < 4) continue; // Avoid IFC
+            // Simple collision avoid with central landmarks
+            if(isCentralArea && Math.abs(x - (-8)) < 4 && Math.abs(z - (-8)) < 4) continue;
+            if(isCentralArea && Math.abs(x - 8) < 4 && Math.abs(z - (-5)) < 4) continue;
 
             b.position.set(x, h/2, z);
-            b.castShadow = true;
-            b.receiveShadow = true;
+            b.castShadow = true; b.receiveShadow = true;
             
-            scene.add(b);
+            cityGroup.add(b);
             buildings.push(b);
         }
 
-        // Initialize Cloud Group
-        cloudGroup = new THREE.Group();
-        scene.add(cloudGroup);
-        // Generate initial clouds
-        for(let i=0; i<8; i++) {
-            createCloud();
+        // 4. Clouds (Regenerate to match seed or keep random? Keep dynamic)
+        if(!cloudGroup) {
+            cloudGroup = new THREE.Group();
+            scene.add(cloudGroup);
+            for(let i=0; i<8; i++) createCloud();
         }
+        
+        // Re-apply night lights if needed
+        if(isNight) updateDayNightVisuals();
     }
 
     function createCloud() {
         const geo = new THREE.DodecahedronGeometry(Math.random() * 2 + 1);
-        const mat = new THREE.MeshStandardMaterial({ 
-            color: 0xffffff, 
-            flatShading: true,
-            opacity: 0.9,
-            transparent: true 
-        });
+        const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true, opacity: 0.9, transparent: true });
         const cloud = new THREE.Mesh(geo, mat);
-        
-        cloud.position.set(
-            (Math.random() - 0.5) * 50,
-            15 + Math.random() * 10,
-            (Math.random() - 0.5) * 50
-        );
-        
+        cloud.position.set((Math.random()-0.5)*50, 15+Math.random()*10, (Math.random()-0.5)*50);
         cloud.userData = { speed: Math.random() * 0.05 + 0.02 };
         cloudGroup.add(cloud);
     }
@@ -410,47 +498,24 @@
         object.add(label);
     }
 
-    // --- Weather Effects ---
-
+    // --- Weather ---
     function createRain() {
-        if(rainSystem) {
-            rainSystem.visible = true;
-            return;
-        }
-
-        const rainCount = 3000;
+        if(rainSystem) { rainSystem.visible = true; return; }
         const geom = new THREE.BufferGeometry();
         const positions = [];
-
-        for(let i=0; i<rainCount; i++) {
-            positions.push(
-                (Math.random() - 0.5) * 60, // x
-                Math.random() * 40,         // y
-                (Math.random() - 0.5) * 60  // z
-            );
-        }
-
+        for(let i=0; i<3000; i++) positions.push((Math.random()-0.5)*60, Math.random()*40, (Math.random()-0.5)*60);
         geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-        const mat = new THREE.PointsMaterial({
-            color: 0xaaaaaa,
-            size: 0.3,
-            transparent: true,
-            opacity: 0.8
-        });
-
+        const mat = new THREE.PointsMaterial({ color: 0xaaaaaa, size: 0.3, transparent: true, opacity: 0.8 });
         rainSystem = new THREE.Points(geom, mat);
         scene.add(rainSystem);
     }
 
     function updateRain() {
         if(!rainSystem || !rainSystem.visible) return;
-        
         const positions = rainSystem.geometry.attributes.position.array;
         for(let i=1; i<positions.length; i+=3) {
-            positions[i] -= 0.5; // Fall speed
-            if(positions[i] < 0) {
-                positions[i] = 40; // Reset height
-            }
+            positions[i] -= 0.5;
+            if(positions[i] < 0) positions[i] = 40;
         }
         rainSystem.geometry.attributes.position.needsUpdate = true;
     }
@@ -458,119 +523,114 @@
     function updateClouds() {
         cloudGroup.children.forEach(cloud => {
             cloud.position.x += cloud.userData.speed;
-            if(cloud.position.x > 30) {
-                cloud.position.x = -30;
-            }
+            if(cloud.position.x > 30) cloud.position.x = -30;
         });
     }
 
-    // --- API Integration ---
-
     async function fetchWeather() {
         try {
-            // 1. Current Weather
             const rhrResponse = await fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=tc');
             const rhrData = await rhrResponse.json();
 
-            // 2. Forecast (for icons if needed, but RHR has icons usually)
-            // Using RHR icon list
-            const iconIndex = rhrData.icon ? rhrData.icon[0] : 50; // Default sun
-            const temp = rhrData.temperature ? rhrData.temperature.data[0].value : '--';
+            if (rhrData.temperature && rhrData.temperature.data) {
+                weatherState.districtData = rhrData.temperature.data;
+                populateDistrictList(weatherState.districtData);
+            }
+
+            const iconIndex = rhrData.icon ? rhrData.icon[0] : 50;
             const humidity = rhrData.humidity ? rhrData.humidity.data[0].value : '--';
-            
-            // Update UI
-            document.getElementById('temp-val').innerText = `${temp}°C`;
             document.getElementById('humidity').innerText = `濕度: ${humidity}%`;
             document.getElementById('loading').style.opacity = 0;
 
-            // Determine Weather Type based on Icon Index
-            // HK Observatory Icons: 
-            // 50-54: Sun/Fine
-            // 60-65: Rain
-            // 80-85: Wind/Storm
-            
-            // Simple mapping logic
+            const currentSelected = document.getElementById('district-list').value;
+            // Only update temp, don't trigger layout regen here to avoid reset while viewing
+            updateTemperatureDisplay(currentSelected); 
+            // Trigger image load if not yet loaded
+            if(document.getElementById('district-image').style.display === 'none') {
+                handleDistrictChange(currentSelected || "香港天文台");
+            }
+
             let desc = "晴天";
             let isRain = false;
-
-            if (iconIndex >= 60 && iconIndex <= 65) {
-                desc = "下雨";
-                isRain = true;
-            } else if (iconIndex >= 50 && iconIndex <= 54) {
-                desc = "天晴";
-            } else {
-                desc = "多雲";
-            }
+            if (iconIndex >= 60 && iconIndex <= 65) { desc = "下雨"; isRain = true; }
+            else if (iconIndex >= 50 && iconIndex <= 54) { desc = "天晴"; }
+            else { desc = "多雲"; }
             
-            // Add custom check for rain warning in data
-            if(rhrData.warningMessage) {
-                // If there's a rainstorm warning, force rain
-                if(rhrData.warningMessage.some(w => w.includes("雨"))) isRain = true;
-            }
+            if(rhrData.warningMessage && rhrData.warningMessage.some(w => w.includes("雨"))) isRain = true;
 
             document.getElementById('weather-desc').innerText = desc;
-
-            // Update 3D Scene
-            weatherState.isRainy = isRain;
             
             if(isRain) {
                 createRain();
                 if(rainSystem) rainSystem.visible = true;
-                // Darken clouds
                 cloudGroup.children.forEach(c => c.material.color.setHex(0x555555));
             } else {
                 if(rainSystem) rainSystem.visible = false;
-                // White clouds
                 cloudGroup.children.forEach(c => c.material.color.setHex(0xffffff));
             }
-
         } catch (error) {
-            console.error("Error fetching weather:", error);
+            console.error(error);
             document.getElementById('weather-desc').innerText = "數據暫時無法取得";
         }
     }
 
-    // --- Animation Loop ---
+    function populateDistrictList(data) {
+        const select = document.getElementById('district-list');
+        const currentVal = select.value;
+        if (select.options.length > 1 && select.options[0].value !== "loading") return;
+
+        select.innerHTML = "";
+        select.disabled = false;
+
+        data.forEach(item => {
+            const opt = document.createElement('option');
+            opt.value = item.place;
+            opt.textContent = item.place;
+            select.appendChild(opt);
+        });
+
+        // Smart default: HKO or first item
+        if (currentVal && Array.from(select.options).some(o => o.value === currentVal)) {
+            select.value = currentVal;
+        } else {
+            const hko = Array.from(select.options).find(o => o.value.includes("Hong Kong Observatory") || o.value.includes("香港天文台"));
+            const defaultPlace = hko ? hko.value : data[0].place;
+            select.value = defaultPlace;
+            handleDistrictChange(defaultPlace); // Initial view set
+        }
+    }
+
+    function updateTemperatureDisplay(placeName) {
+        if (!weatherState.districtData || weatherState.districtData.length === 0) return;
+        const data = weatherState.districtData.find(d => d.place === placeName);
+        if (data) document.getElementById('temp-val').innerText = `${data.value}°C`;
+        else {
+             const first = weatherState.districtData[0];
+             if(first) document.getElementById('temp-val').innerText = `${first.value}°C`;
+        }
+    }
 
     function animate() {
         requestAnimationFrame(animate);
-        
         controls.update();
-        
-        // Rotate the floating island slightly
-        // scene.rotation.y += 0.0005; 
-        
         updateRain();
         updateClouds();
-
         renderer.render(scene, camera);
         labelRenderer.render(scene, camera);
     }
 
-    // --- Resize Handler ---
     function onWindowResize() {
         const aspect = window.innerWidth / window.innerHeight;
         const d = 35;
-        
-        camera.left = -d * aspect;
-        camera.right = d * aspect;
-        camera.top = d;
-        camera.bottom = -d;
-        
+        camera.left = -d * aspect; camera.right = d * aspect;
+        camera.top = d; camera.bottom = -d;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
         labelRenderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // --- Snapshot Feature ---
     function takeSnapshot() {
-        // Render once to ensure buffer is fresh
         renderer.render(scene, camera);
-        
-        // Create a temporary canvas to combine 3D + UI text (simplified)
-        // Note: CSS2D Objects (Labels) are DOM elements, they won't appear in toDataURL.
-        // For this demo, we just capture the 3D scene. 
-        
         try {
             const dataURL = renderer.domElement.toDataURL("image/png");
             const link = document.createElement('a');
@@ -581,13 +641,9 @@
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-        } catch (e) {
-            alert("截圖失敗 (Security/Browser restriction)");
-            console.error(e);
-        }
+        } catch (e) { console.error(e); }
     }
 
-    // Boot
     init();
 
 </script>
