@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>香港天气玩具城 3D (HK Weather Toy City)</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Microsoft JhengHei', sans-serif; background-color: #87CEEB; transition: background-color 2s; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none; /* Let clicks pass through to 3D */
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.9);
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            backdrop-filter: blur(5px);
+            pointer-events: auto;
+            max-width: 300px;
+            border: 2px solid #fff;
+        }
+
+        h1 { margin: 0 0 10px 0; font-size: 1.5rem; color: #333; }
+        .temp-display { font-size: 2.5rem; font-weight: bold; color: #ff6b6b; }
+        .info-row { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; color: #555; }
+        .icon { font-size: 1.5rem; }
+
+        #snapshot-btn {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            padding: 15px 25px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            transition: transform 0.2s, background 0.2s;
+            pointer-events: auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        #snapshot-btn:hover { transform: scale(1.05); background: #45a049; }
+        #snapshot-btn:active { transform: scale(0.95); }
+
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 1.5rem;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+
+        /* 3D Label Styling (CSS2D) */
+        .label-3d {
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: bold;
+            pointer-events: none;
+            text-align: center;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+    </style>
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load OrbitControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- Load CSS2DRenderer for Labels -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+</head>
+<body>
+
+    <div id="loading">正在載入玩具城市...</div>
+
+    <div id="ui-layer">
+        <div class="card">
+            <h1>📍 香港天氣 (Live)</h1>
+            <div class="info-row">
+                <div class="temp-display" id="temp-val">--°C</div>
+                <div id="weather-desc">載入中...</div>
+            </div>
+            <div class="info-row" style="font-size: 0.9rem; margin-top:10px;">
+                <span id="humidity">濕度: --%</span>
+            </div>
+            <div style="font-size: 0.8rem; color: #888; margin-top: 10px;">
+                數據來源: 香港天文台
+            </div>
+        </div>
+    </div>
+
+    <button id="snapshot-btn">
+        <span>📷 下載天氣快照</span>
+    </button>
+
+    <div id="canvas-container"></div>
+
+<script>
+    // --- Configuration ---
+    let scene, camera, renderer, labelRenderer, controls;
+    let rainSystem, cloudGroup;
+    const buildings = [];
+    let isRaining = false;
+    let isNight = false;
+    let waterMesh;
+
+    // --- Weather Data State ---
+    const weatherState = {
+        temp: 25,
+        humidity: 80,
+        conditionrip: "Clear",
+        isRainy: false
+    };
+
+    // --- Initialization ---
+    function init() {
+        const container = document.getElementById('canvas-container');
+
+        // 1. Scene
+        scene = new THREE.Scene();
+        
+        // 2. Camera (Orthographic for Isometric/Toy look)
+        const aspect = window.innerWidth / window.innerHeight;
+        const d = 35; // View size
+        camera = new THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 1, 1000);
+        camera.position.set(40, 35, 40); // Isometric angle
+        camera.lookAt(0, 0, 0);
+
+        // 3. Renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        container.appendChild(renderer.domElement);
+
+        // 4. CSS2D Renderer (for floating HTML labels)
+        labelRenderer = new THREE.CSS2DRenderer();
+        labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        labelRenderer.domElement.style.position = 'absolute';
+        labelRenderer.domElement.style.top = '0px';
+        labelRenderer.domElement.style.pointerEvents = 'none'; // Allow clicks to pass through
+        container.appendChild(labelRenderer.domElement);
+
+        // 5. Controls
+        controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxPolarAngle = Math.PI / 2.2; // Don't go below ground
+        controls.minZoom = 0.5;
+        controls.maxZoom = 2;
+
+        // 6. Lights
+        setupLights();
+
+        // 7. World Generation
+        createEnvironment();
+        createCity();
+        
+        // 8. Event Listeners
+        window.addEventListener('resize', onWindowResize, false);
+        document.getElementById('snapshot-btn').addEventListener('click', takeSnapshot);
+
+        // 9. Initial Weather Fetch
+        checkTimeOfDay();
+        fetchWeather();
+        setInterval(fetchWeather, 600000); // Update every 10 mins
+
+        // 10. Start Loop
+        animate();
+    }
+
+    // --- Lighting & Atmosphere ---
+    let sunLight, ambientLight;
+
+    function setupLights() {
+        ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        sunLight.position.set(50, 80, 30);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        sunLight.shadow.mapSize.height = 2048;
+        sunLight.shadow.camera.near = 0.5;
+        sunLight.shadow.camera.far = 200;
+        
+        // Shadow camera bounds for Orthographic
+        const d = 50;
+        sunLight.shadow.camera.left = -d;
+        sunLight.shadow.camera.right = d;
+        sunLight.shadow.camera.top = d;
+        sunLight.shadow.camera.bottom = -d;
+
+        scene.add(sunLight);
+    }
+
+    function checkTimeOfDay() {
+        const hour = new Date().getHours();
+        isNight = (hour >= 18 || hour < 6);
+        updateDayNightVisuals();
+    }
+
+    function updateDayNightVisuals() {
+        const body = document.body;
+        
+        if (isNight) {
+            // Night Mode
+            body.style.backgroundColor = '#0f172a'; // Dark blue
+            scene.background = new THREE.Color('#0f172a');
+            ambientLight.intensity = 0.2;
+            sunLight.intensity = 0.2;
+            sunLight.color.setHex(0xaaaaff); // Moonlight
+            
+            // Turn on building lights (emissive)
+            buildings.forEach(b => {
+                if (b.material.emissive) {
+                    b.material.emissive.setHex(Math.random() > 0.5 ? 0xffffaa : 0x000000);
+                    b.material.emissiveIntensity = 0.5;
+                }
+            });
+
+            // Darker water
+            if(waterMesh) waterMesh.material.color.setHex(0x001e36);
+
+        } else {
+            // Day Mode
+            body.style.backgroundColor = '#87CEEB'; // Sky blue
+            scene.background = new THREE.Color('#87CEEB');
+            ambientLight.intensity = 0.6;
+            sunLight.intensity = 0.9;
+            sunLight.color.setHex(0xffffff);
+
+            // Turn off building lights
+            buildings.forEach(b => {
+                if (b.material.emissive) {
+                    b.material.emissive.setHex(0x000000);
+                }
+            });
+
+            // Lighter water
+            if(waterMesh) waterMesh.material.color.setHex(0x1ca3ec);
+        }
+    }
+
+    // --- Procedural Generation Helpers ---
+
+    function createEnvironment() {
+        // Base Platform (Island)
+        const islandGeo = new THREE.CylinderGeometry(28, 28, 2, 8);
+        const islandMat = new THREE.MeshLambertMaterial({ color: 0xe0e0e0 });
+        const island = new THREE.Mesh(islandGeo, islandMat);
+        island.position.y = -1;
+        island.receiveShadow = true;
+        scene.add(island);
+
+        // Water
+        const waterGeo = new THREE.PlaneGeometry(500, 500);
+        const waterMat = new THREE.MeshLambertMaterial({ color: 0x1ca3ec, transparent: true, opacity: 0.8 });
+        waterMesh = new THREE.Mesh(waterGeo, waterMat);
+        waterMesh.rotation.x = -Math.PI / 2;
+        waterMesh.position.y = -2;
+        scene.add(waterMesh);
+    }
+
+    // Create a texture for windows programmatically
+    function createWindowTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 64;
+        canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        
+        // Background (Wall)
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0,0,64,64);
+
+        // Windows
+        ctx.fillStyle = '#444'; // Dark window by default
+        // Draw 2x2 window grid
+        ctx.fillRect(8, 8, 20, 20);
+        ctx.fillRect(36, 8, 20, 20);
+        ctx.fillRect(8, 36, 20, 20);
+        ctx.fillRect(36, 36, 20, 20);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.magFilter = THREE.NearestFilter; // Sharp pixels
+        return tex;
+    }
+
+    function createCity() {
+        const windowTex = createWindowTexture();
+        const material = new THREE.MeshStandardMaterial({ 
+            map: windowTex,
+            color: 0xeeeeee,
+            roughness: 0.2,
+            metalness: 0.1
+        });
+
+        const matColors = [0xffffff, 0xdddddd, 0xaaccff];
+
+        // 1. Bank of China Tower (Custom Geometry)
+        // Simplified as a stack of prisms
+        const bocHeight = 16;
+        const bocGeo = new THREE.BoxGeometry(4, bocHeight, 4);
+        // Create the cross bracing effect simply via geometry or texture is hard, 
+        // let's stick to shape. We rotate it 45 deg to look like a diamond.
+        const bocMat = new THREE.MeshStandardMaterial({ 
+            color: 0xaaaaee, roughness: 0.1, metalness: 0.5, 
+            emissive: 0x111133 
+        });
+        const boc = new THREE.Mesh(bocGeo, bocMat);
+        boc.position.set(-8, bocHeight/2, -8);
+        boc.rotation.y = Math.PI / 4;
+        boc.castShadow = true;
+        boc.receiveShadow = true;
+        scene.add(boc);
+        buildings.push(boc);
+        addLabel(boc, "中銀大廈", 10);
+
+        // 2. IFC (Tall rectangular prism with crown)
+        const ifcHeight = 18;
+        const ifcGeo = new THREE.BoxGeometry(5, ifcHeight, 5);
+        const ifcMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.3 });
+        const ifc = new THREE.Mesh(ifcGeo, ifcMat);
+        ifc.position.set(8, ifcHeight/2, -5);
+        ifc.castShadow = true;
+        scene.add(ifc);
+        buildings.push(ifc);
+        addLabel(ifc, "IFC", 11);
+
+        // 3. Random Skyscrapers
+        for(let i=0; i<30; i++) {
+            const h = Math.random() * 8 + 3; // Height 3 to 11
+            const w = Math.random() * 2 + 1.5;
+            
+            const geo = new THREE.BoxGeometry(w, h, w);
+            const thisMat = material.clone();
+            thisMat.color.setHex(matColors[Math.floor(Math.random()*matColors.length)]);
+            
+            const b = new THREE.Mesh(geo, thisMat);
+            
+            // Random position in circle, avoiding center roughly
+            const angle = Math.random() * Math.PI * 2;
+            const radius = Math.random() * 18 + 5; // 5 to 23 radius
+            const x = Math.cos(angle) * radius;
+            const z = Math.sin(angle) * radius;
+
+            // Simple collision check logic (very basic)
+            if(Math.abs(x - (-8)) < 4 && Math.abs(z - (-8)) < 4) continue; // Avoid BoC
+            if(Math.abs(x - 8) < 4 && Math.abs(z - (-5)) < 4) continue; // Avoid IFC
+
+            b.position.set(x, h/2, z);
+            b.castShadow = true;
+            b.receiveShadow = true;
+            
+            scene.add(b);
+            buildings.push(b);
+        }
+
+        // Initialize Cloud Group
+        cloudGroup = new THREE.Group();
+        scene.add(cloudGroup);
+        // Generate initial clouds
+        for(let i=0; i<8; i++) {
+            createCloud();
+        }
+    }
+
+    function createCloud() {
+        const geo = new THREE.DodecahedronGeometry(Math.random() * 2 + 1);
+        const mat = new THREE.MeshStandardMaterial({ 
+            color: 0xffffff, 
+            flatShading: true,
+            opacity: 0.9,
+            transparent: true 
+        });
+        const cloud = new THREE.Mesh(geo, mat);
+        
+        cloud.position.set(
+            (Math.random() - 0.5) * 50,
+            15 + Math.random() * 10,
+            (Math.random() - 0.5) * 50
+        );
+        
+        cloud.userData = { speed: Math.random() * 0.05 + 0.02 };
+        cloudGroup.add(cloud);
+    }
+
+    function addLabel(object, text, yOffset) {
+        const div = document.createElement('div');
+        div.className = 'label-3d';
+        div.textContent = text;
+        const label = new THREE.CSS2DObject(div);
+        label.position.set(0, yOffset, 0);
+        object.add(label);
+    }
+
+    // --- Weather Effects ---
+
+    function createRain() {
+        if(rainSystem) {
+            rainSystem.visible = true;
+            return;
+        }
+
+        const rainCount = 3000;
+        const geom = new THREE.BufferGeometry();
+        const positions = [];
+
+        for(let i=0; i<rainCount; i++) {
+            positions.push(
+                (Math.random() - 0.5) * 60, // x
+                Math.random() * 40,         // y
+                (Math.random() - 0.5) * 60  // z
+            );
+        }
+
+        geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        const mat = new THREE.PointsMaterial({
+            color: 0xaaaaaa,
+            size: 0.3,
+            transparent: true,
+            opacity: 0.8
+        });
+
+        rainSystem = new THREE.Points(geom, mat);
+        scene.add(rainSystem);
+    }
+
+    function updateRain() {
+        if(!rainSystem || !rainSystem.visible) return;
+        
+        const positions = rainSystem.geometry.attributes.position.array;
+        for(let i=1; i<positions.length; i+=3) {
+            positions[i] -= 0.5; // Fall speed
+            if(positions[i] < 0) {
+                positions[i] = 40; // Reset height
+            }
+        }
+        rainSystem.geometry.attributes.position.needsUpdate = true;
+    }
+
+    function updateClouds() {
+        cloudGroup.children.forEach(cloud => {
+            cloud.position.x += cloud.userData.speed;
+            if(cloud.position.x > 30) {
+                cloud.position.x = -30;
+            }
+        });
+    }
+
+    // --- API Integration ---
+
+    async function fetchWeather() {
+        try {
+            // 1. Current Weather
+            const rhrResponse = await fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=tc');
+            const rhrData = await rhrResponse.json();
+
+            // 2. Forecast (for icons if needed, but RHR has icons usually)
+            // Using RHR icon list
+            const iconIndex = rhrData.icon ? rhrData.icon[0] : 50; // Default sun
+            const temp = rhrData.temperature ? rhrData.temperature.data[0].value : '--';
+            const humidity = rhrData.humidity ? rhrData.humidity.data[0].value : '--';
+            
+            // Update UI
+            document.getElementById('temp-val').innerText = `${temp}°C`;
+            document.getElementById('humidity').innerText = `濕度: ${humidity}%`;
+            document.getElementById('loading').style.opacity = 0;
+
+            // Determine Weather Type based on Icon Index
+            // HK Observatory Icons: 
+            // 50-54: Sun/Fine
+            // 60-65: Rain
+            // 80-85: Wind/Storm
+            
+            // Simple mapping logic
+            let desc = "晴天";
+            let isRain = false;
+
+            if (iconIndex >= 60 && iconIndex <= 65) {
+                desc = "下雨";
+                isRain = true;
+            } else if (iconIndex >= 50 && iconIndex <= 54) {
+                desc = "天晴";
+            } else {
+                desc = "多雲";
+            }
+            
+            // Add custom check for rain warning in data
+            if(rhrData.warningMessage) {
+                // If there's a rainstorm warning, force rain
+                if(rhrData.warningMessage.some(w => w.includes("雨"))) isRain = true;
+            }
+
+            document.getElementById('weather-desc').innerText = desc;
+
+            // Update 3D Scene
+            weatherState.isRainy = isRain;
+            
+            if(isRain) {
+                createRain();
+                if(rainSystem) rainSystem.visible = true;
+                // Darken clouds
+                cloudGroup.children.forEach(c => c.material.color.setHex(0x555555));
+            } else {
+                if(rainSystem) rainSystem.visible = false;
+                // White clouds
+                cloudGroup.children.forEach(c => c.material.color.setHex(0xffffff));
+            }
+
+        } catch (error) {
+            console.error("Error fetching weather:", error);
+            document.getElementById('weather-desc').innerText = "數據暫時無法取得";
+        }
+    }
+
+    // --- Animation Loop ---
+
+    function animate() {
+        requestAnimationFrame(animate);
+        
+        controls.update();
+        
+        // Rotate the floating island slightly
+        // scene.rotation.y += 0.0005; 
+        
+        updateRain();
+        updateClouds();
+
+        renderer.render(scene, camera);
+        labelRenderer.render(scene, camera);
+    }
+
+    // --- Resize Handler ---
+    function onWindowResize() {
+        const aspect = window.innerWidth / window.innerHeight;
+        const d = 35;
+        
+        camera.left = -d * aspect;
+        camera.right = d * aspect;
+        camera.top = d;
+        camera.bottom = -d;
+        
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // --- Snapshot Feature ---
+    function takeSnapshot() {
+        // Render once to ensure buffer is fresh
+        renderer.render(scene, camera);
+        
+        // Create a temporary canvas to combine 3D + UI text (simplified)
+        // Note: CSS2D Objects (Labels) are DOM elements, they won't appear in toDataURL.
+        // For this demo, we just capture the 3D scene. 
+        
+        try {
+            const dataURL = renderer.domElement.toDataURL("image/png");
+            const link = document.createElement('a');
+            const date = new Date();
+            const timeStr = date.getHours() + "-" + date.getMinutes();
+            link.download = `HK_Weather_ToyCity_${timeStr}.png`;
+            link.href = dataURL;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        } catch (e) {
+            alert("截圖失敗 (Security/Browser restriction)");
+            console.error(e);
+        }
+    }
+
+    // Boot
+    init();
+
+</script>
+</body>
+</html>
